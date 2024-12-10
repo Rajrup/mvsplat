@@ -1,0 +1,38 @@
+{
+    "scan34_train_00": {
+        "context": [
+            2,
+            4
+        ],
+        "target": [
+            3
+        ]
+    },
+    "scan34_train_01": {
+        "context": [
+            6,
+            8
+        ],
+        "target": [
+            7
+        ]
+    },
+    "scan35_train_00": {
+        "context": [
+            1,
+            3
+        ],
+        "target": [
+            2
+        ]
+    },
+    "scan36_train_01": {
+        "context": [
+            5,
+            7
+        ],
+        "target": [
+            6
+        ]
+    }
+}

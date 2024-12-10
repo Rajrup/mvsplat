@@ -9,6 +9,7 @@ from typing import Literal, TypedDict
 import numpy as np
 import torch
 from jaxtyping import Float, Int, UInt8
+from PIL import Image
 from torch import Tensor
 import argparse
 from tqdm import tqdm
@@ -17,29 +18,32 @@ import json
 import os
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--input_dir", type=str, help="input dtu raw directory")
+parser.add_argument("--input_dir", type=str, help="input raw data directory")
 parser.add_argument("--output_dir", type=str, help="output directory")
 args = parser.parse_args()
 
 INPUT_IMAGE_DIR = Path(args.input_dir)
 OUTPUT_DIR = Path(args.output_dir)
 
+# number of cameras
+NUM_CAMS = 10
 
 # Target 100 MB per chunk.
 TARGET_BYTES_PER_CHUNK = int(1e8)
 
+# scale_factor = 1.0 / 200
+scale_factor = 1.0
 
 def build_camera_info(id_list, root_dir):
     """Return the camera information for the given id_list"""
     intrinsics, world2cams, cam2worlds, near_fars = {}, {}, {}, {}
-    scale_factor = 1.0 / 200
     downSample = 1.0
     for vid in id_list:
         proj_mat_filename = os.path.join(
             root_dir, f"Cameras/train/{vid:08d}_cam.txt")
         intrinsic, extrinsic, near_far = read_cam_file(proj_mat_filename)
 
-        intrinsic[:2] *= 4
+        # intrinsic[:2] *= 1000.0
         intrinsic[:2] = intrinsic[:2] * downSample
         intrinsics[vid] = intrinsic
 
@@ -53,8 +57,6 @@ def build_camera_info(id_list, root_dir):
 
 
 def read_cam_file(filename):
-    scale_factor = 1.0 / 200
-
     with open(filename) as f:
         lines = [line.rstrip() for line in f.readlines()]
     # extrinsics: line [1,5), 4x4 matrix
@@ -71,25 +73,14 @@ def read_cam_file(filename):
 
 
 def get_example_keys(stage: Literal["test", "train"]) -> list[str]:
-    """ Extracted from: https://github.com/donydchen/matchnerf/blob/main/configs/dtu_meta/val_all.txt """
-    keys = [
-        "scan1_train"
-        # "scan8_train",
-        # "scan21_train",
-        # "scan30_train",
-        # "scan31_train",
-        # "scan34_train",
-        # "scan38_train",
-        # "scan40_train",
-        # "scan41_train",
-        # "scan45_train",
-        # "scan55_train",
-        # "scan63_train",
-        # "scan82_train",
-        # "scan103_train",
-        # "scan110_train",
-        # "scan114_train",
-    ]
+    # id_list = [
+    #     34, 38, 40, 41, 45, 55, 63, 82, 103, 110, 
+    #     114, 138, 150, 159, 173, 226, 255, 286, 321, 437, 602
+    # ]
+    # id_list = list(range(34, 72, 2))
+
+    id_list = [34, 35, 36]
+    keys = [f"scan{id}_train" for id in id_list]
     print(f"Found {len(keys)} keys.")
     return keys
 
@@ -106,12 +97,25 @@ def load_raw(path: Path) -> UInt8[Tensor, " length"]:
 def load_images(example_path: Path) -> dict[int, UInt8[Tensor, "..."]]:
     """Load JPG images as raw bytes (do not decode)."""
     images_dict = {}
-    for cur_id in range(1, 50):
+    width, height = None, None
+    for cur_id in range(1, NUM_CAMS+1):
         cur_image_name = f"rect_{cur_id:03d}_3_r5000.png"
-        img_bin = load_raw(example_path / cur_image_name)
+        image_path = example_path / cur_image_name
+        img_bin = load_raw(image_path)
         images_dict[cur_id - 1] = img_bin
+        with Image.open(image_path) as img:
+            img_width, img_height = img.size
+        if width is None and height is None:
+            width, height = img_width, img_height
+        else:
+            if img_width != width or img_height != height:
+                raise ValueError(
+                    f"Image {cur_image_name} has dimensions {img_width}x{img_height}, "
+                    f"which do not match the expected {width}x{height} pixels."
+                )
+        print(f"Image dimensions: {width}x{height} pixels.")
 
-    return images_dict
+    return images_dict, width, height
 
 
 class Metadata(TypedDict):
@@ -125,7 +129,7 @@ class Example(Metadata):
     images: list[UInt8[Tensor, "..."]]
 
 
-def load_metadata(intrinsics, world2cams) -> Metadata:
+def load_metadata(intrinsics, world2cams, w, h) -> Metadata:
     timestamps = []
     cameras = []
     url = ""
@@ -133,18 +137,20 @@ def load_metadata(intrinsics, world2cams) -> Metadata:
     for vid, intr in intrinsics.items():
         timestamps.append(int(vid))
 
-        # normalized the intr
         fx = intr[0, 0]
         fy = intr[1, 1]
         cx = intr[0, 2]
         cy = intr[1, 2]
-        # breakpoint()
         w = 2.0 * cx
         h = 2.0 * cy
         saved_fx = fx / w
         saved_fy = fy / h
         saved_cx = 0.5
         saved_cy = 0.5
+        # saved_fx = fx / w
+        # saved_fy = fy / h
+        # saved_cx = cx / w
+        # saved_cy = cy / h
         camera = [saved_fx, saved_fy, saved_cx, saved_cy, 0.0, 0.0]
 
         w2c = world2cams[vid]
@@ -162,10 +168,10 @@ def load_metadata(intrinsics, world2cams) -> Metadata:
 
 
 if __name__ == "__main__":
-    # we only use DTU for testing, not for training
+    # The data is used only for testing, not training
     for stage in ("test",):
         intrinsics, world2cams, cam2worlds, near_fars = build_camera_info(
-            list(range(49)), INPUT_IMAGE_DIR
+            list(range(NUM_CAMS)), INPUT_IMAGE_DIR
         )
 
         keys = get_example_keys(stage)
@@ -197,8 +203,8 @@ if __name__ == "__main__":
             num_bytes = get_size(image_dir) // 7
 
             # Read images and metadata.
-            images = load_images(image_dir)
-            example = load_metadata(intrinsics, world2cams)
+            images, width, height = load_images(image_dir)
+            example = load_metadata(intrinsics, world2cams, width, height)
 
             # Merge the images into the example.
             example["images"] = [
